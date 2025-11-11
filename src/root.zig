@@ -10,6 +10,7 @@ const std = @import("std");
 pub const rng = @import("rng.zig");
 pub const hash = @import("hash.zig");
 pub const pq = @import("pq/root.zig");
+pub const blockchain = @import("blockchain/root.zig");
 
 // Algorithm enumerations
 pub const Algorithm = enum {
@@ -58,7 +59,7 @@ pub fn generate_keypair(allocator: std.mem.Allocator, algo: Algorithm) !KeyPair 
         .Kyber512, .Kyber768, .Kyber1024 => pq.kyber.generate_keypair(allocator, algo),
         .Dilithium2, .Dilithium3, .Dilithium5 => pq.dilithium.generate_keypair(allocator, algo),
         .Sphincs128f, .Sphincs128s, .Sphincs192f, .Sphincs192s, .Sphincs256f, .Sphincs256s => pq.sphincs.generate_keypair(allocator, algo),
-        .Kyber512_AES256, .Kyber768_AES256, .Kyber1024_AES256 => @panic("Hybrid schemes not implemented yet"),
+        .Kyber512_AES256, .Kyber768_AES256, .Kyber1024_AES256 => pq.hybrid.generate_hybrid_kem_keypair(allocator, algo),
     };
 }
 
@@ -67,7 +68,7 @@ pub fn encrypt(allocator: std.mem.Allocator, public_key: []const u8, message: []
         .Kyber512, .Kyber768, .Kyber1024 => pq.kyber.encrypt(allocator, public_key, message, algo),
         .Dilithium2, .Dilithium3, .Dilithium5 => @panic("Dilithium is signature only"),
         .Sphincs128f, .Sphincs128s, .Sphincs192f, .Sphincs192s, .Sphincs256f, .Sphincs256s => @panic("SPHINCS+ is signature only"),
-        .Kyber512_AES256, .Kyber768_AES256, .Kyber1024_AES256 => @panic("Hybrid schemes not implemented yet"),
+        .Kyber512_AES256, .Kyber768_AES256, .Kyber1024_AES256 => pq.hybrid.encrypt_hybrid(allocator, public_key, message, algo),
     };
 }
 
@@ -76,7 +77,7 @@ pub fn decrypt(allocator: std.mem.Allocator, private_key: []const u8, ciphertext
         .Kyber512, .Kyber768, .Kyber1024 => pq.kyber.decrypt(allocator, private_key, ciphertext.data),
         .Dilithium2, .Dilithium3, .Dilithium5 => @panic("Dilithium is signature only"),
         .Sphincs128f, .Sphincs128s, .Sphincs192f, .Sphincs192s, .Sphincs256f, .Sphincs256s => @panic("SPHINCS+ is signature only"),
-        .Kyber512_AES256, .Kyber768_AES256, .Kyber1024_AES256 => @panic("Hybrid schemes not implemented yet"),
+        .Kyber512_AES256, .Kyber768_AES256, .Kyber1024_AES256 => pq.hybrid.decrypt_hybrid(allocator, private_key, ciphertext),
     };
 }
 
@@ -85,7 +86,7 @@ pub fn sign(allocator: std.mem.Allocator, private_key: []const u8, message: []co
         .Kyber512, .Kyber768, .Kyber1024 => @panic("Kyber is KEM only"),
         .Dilithium2, .Dilithium3, .Dilithium5 => pq.dilithium.sign(allocator, private_key, message, algo),
         .Sphincs128f, .Sphincs128s, .Sphincs192f, .Sphincs192s, .Sphincs256f, .Sphincs256s => pq.sphincs.sign(allocator, private_key, message, algo),
-        .Kyber512_AES256, .Kyber768_AES256, .Kyber1024_AES256 => @panic("Hybrid schemes not implemented yet"),
+        .Kyber512_AES256, .Kyber768_AES256, .Kyber1024_AES256 => @panic("Hybrid schemes are KEM only"),
     };
 }
 
@@ -94,7 +95,7 @@ pub fn verify(public_key: []const u8, message: []const u8, signature: Signature)
         .Kyber512, .Kyber768, .Kyber1024 => @panic("Kyber is KEM only"),
         .Dilithium2, .Dilithium3, .Dilithium5 => pq.dilithium.verify(public_key, message, signature.data),
         .Sphincs128f, .Sphincs128s, .Sphincs192f, .Sphincs192s, .Sphincs256f, .Sphincs256s => pq.sphincs.verify(public_key, message, signature.data),
-        .Kyber512_AES256, .Kyber768_AES256, .Kyber1024_AES256 => @panic("Hybrid schemes not implemented yet"),
+        .Kyber512_AES256, .Kyber768_AES256, .Kyber1024_AES256 => @panic("Hybrid schemes are KEM only"),
     };
 }
 
