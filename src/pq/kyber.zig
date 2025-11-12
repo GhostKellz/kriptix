@@ -6,6 +6,9 @@ const std = @import("std");
 const crypto = std.crypto;
 const rng = @import("../rng.zig");
 const hash = @import("../hash.zig");
+const blake3 = std.crypto.hash.Blake3;
+const testing = std.testing;
+const build_options = @import("build_options");
 const Algorithm = @import("../root.zig").Algorithm;
 const KeyPair = @import("../root.zig").KeyPair;
 const Ciphertext = @import("../root.zig").Ciphertext;
@@ -52,6 +55,38 @@ const Q = 3329;
 const SYMBYTES = 32;
 const SSBYTES = 32;
 
+pub const SharedSecretLength: usize = SSBYTES;
+
+pub const Error = error{
+    InvalidPublicKeyLength,
+    InvalidPrivateKeyLength,
+    InvalidCiphertextLength,
+    UnsupportedAlgorithm,
+};
+
+fn fillRandom(drbg: ?*rng.DRBG, buf: []u8) void {
+    if (drbg) |det| {
+        det.generate(buf);
+    } else {
+        rng.randomBytes(buf);
+    }
+}
+
+pub fn publicKeyLength(algo: Algorithm) usize {
+    const params = Params.fromAlgo(algo);
+    return params.k * N * 2 + SYMBYTES;
+}
+
+pub fn privateKeyLength(algo: Algorithm) usize {
+    const params = Params.fromAlgo(algo);
+    return params.k * N * 2 + publicKeyLength(algo) + 2 * SYMBYTES;
+}
+
+pub fn ciphertextLength(algo: Algorithm) usize {
+    const params = Params.fromAlgo(algo);
+    return params.k * N + N;
+}
+
 // Polynomial ring element
 pub const Poly = struct {
     coeffs: [N]i16,
@@ -77,7 +112,9 @@ pub const Poly = struct {
         for (0..N) |i| {
             for (0..N) |j| {
                 const idx = (i + j) % N;
-                result.coeffs[idx] = @mod(result.coeffs[idx] + self.coeffs[i] * other.coeffs[j], Q);
+                const product = @as(i32, self.coeffs[i]) * @as(i32, other.coeffs[j]);
+                const acc = @as(i32, result.coeffs[idx]) + product;
+                result.coeffs[idx] = @intCast(@mod(acc, Q));
             }
         }
         return result;
@@ -95,11 +132,13 @@ pub const Poly = struct {
             while (angle < N) {
                 const w = zetas[j];
                 j += 1;
+                if (j == zetas.len) j = 0;
                 var i = angle;
                 while (i < angle + len) {
-                    const t = @mod(self.coeffs[i + len] * w, Q);
-                    self.coeffs[i + len] = @mod(self.coeffs[i] - t, Q);
-                    self.coeffs[i] = @mod(self.coeffs[i] + t, Q);
+                    // Use wider arithmetic to prevent overflow
+                    const t = @mod(@as(i32, self.coeffs[i + len]) * @as(i32, w), Q);
+                    self.coeffs[i + len] = @intCast(@mod(@as(i32, self.coeffs[i]) - @as(i32, t) + Q, Q));
+                    self.coeffs[i] = @intCast(@mod(@as(i32, self.coeffs[i]) + @as(i32, t), Q));
                     i += 1;
                 }
                 angle += k;
@@ -117,12 +156,13 @@ pub const Poly = struct {
             while (angle < N) {
                 const w = -zetas_rev[j];
                 j += 1;
+                if (j == zetas_rev.len) j = 0;
                 var i = angle;
                 while (i < angle + k) {
                     const t = self.coeffs[i];
-                    self.coeffs[i] = @mod(t + self.coeffs[i + k], Q);
-                    self.coeffs[i + k] = @mod(t - self.coeffs[i + k], Q);
-                    self.coeffs[i + k] = @mod(self.coeffs[i + k] * w, Q);
+                    self.coeffs[i] = @intCast(@mod(@as(i32, t) + @as(i32, self.coeffs[i + k]), Q));
+                    self.coeffs[i + k] = @intCast(@mod(@as(i32, t) - @as(i32, self.coeffs[i + k]) + Q, Q));
+                    self.coeffs[i + k] = @intCast(@mod(@as(i32, self.coeffs[i + k]) * @as(i32, @abs(w)), Q));
                     i += 1;
                 }
                 angle += 2 * k;
@@ -132,7 +172,7 @@ pub const Poly = struct {
         // Scale by N^(-1) mod Q
         const n_inv = 3303; // N^(-1) mod Q
         for (0..N) |i| {
-            self.coeffs[i] = @mod(self.coeffs[i] * n_inv, Q);
+            self.coeffs[i] = @intCast(@mod(@as(i32, self.coeffs[i]) * @as(i32, n_inv), Q));
         }
     }
 };
@@ -291,9 +331,15 @@ fn genMatrix(allocator: std.mem.Allocator, k: usize, seed: []const u8) ![]PolyVe
 }
 
 // IND-CPA keypair generation
-fn indcpaKeypair(allocator: std.mem.Allocator, params: Params, pk: []u8, sk: []u8) !void {
+fn indcpaKeypair(
+    allocator: std.mem.Allocator,
+    params: Params,
+    pk: []u8,
+    sk: []u8,
+    drbg: ?*rng.DRBG,
+) !void {
     var seed: [SYMBYTES]u8 = undefined;
-    rng.randomBytes(&seed);
+    fillRandom(drbg, &seed);
 
     // Generate matrix A
     var matrix = try genMatrix(allocator, params.k, &seed);
@@ -312,7 +358,7 @@ fn indcpaKeypair(allocator: std.mem.Allocator, params: Params, pk: []u8, sk: []u
         // CBD needs 2*eta*256 bits = 64*eta bytes per polynomial
         const buf_size = 64 * params.eta1;
         var buf: [64 * 3]u8 = undefined; // Max eta is 3, so 192 bytes
-        rng.randomBytes(buf[0..buf_size]);
+    fillRandom(drbg, buf[0..buf_size]);
         s.vec[i] = cbd(params.eta1, buf[0..buf_size]);
     }
 
@@ -324,7 +370,7 @@ fn indcpaKeypair(allocator: std.mem.Allocator, params: Params, pk: []u8, sk: []u
         // CBD needs 2*eta*256 bits = 64*eta bytes per polynomial
         const buf_size = 64 * params.eta1;
         var buf: [64 * 3]u8 = undefined; // Max eta is 3, so 192 bytes
-        rng.randomBytes(buf[0..buf_size]);
+    fillRandom(drbg, buf[0..buf_size]);
         e.vec[i] = cbd(params.eta1, buf[0..buf_size]);
     }
 
@@ -565,8 +611,11 @@ fn verify(a: []const u8, b: []const u8, len: usize) u8 {
     return r;
 }
 
-// Main Kyber functions
-pub fn generate_keypair(allocator: std.mem.Allocator, algo: Algorithm) !KeyPair {
+fn generate_keypair_internal(
+    allocator: std.mem.Allocator,
+    algo: Algorithm,
+    seed: ?[]const u8,
+) !KeyPair {
     const params = Params.fromAlgo(algo);
 
     const pk_len = params.k * N * 2 + SYMBYTES;
@@ -575,7 +624,18 @@ pub fn generate_keypair(allocator: std.mem.Allocator, algo: Algorithm) !KeyPair 
     const public_key = try allocator.alloc(u8, pk_len);
     var private_key = try allocator.alloc(u8, sk_len);
 
-    try indcpaKeypair(allocator, params, public_key, private_key);
+    var hashed_seed: [SYMBYTES]u8 = undefined;
+    var drbg_state: rng.DRBG = undefined;
+    const drbg_ptr: ?*rng.DRBG = blk: {
+        if (seed) |material| {
+            blake3.hash(material, &hashed_seed, .{});
+            drbg_state = rng.DRBG.init(&hashed_seed);
+            break :blk &drbg_state;
+        }
+        break :blk null;
+    };
+
+    try indcpaKeypair(allocator, params, public_key, private_key, drbg_ptr);
 
     // Add public key to secret key (IND-CPA format)
     @memcpy(private_key[params.k * N * 2 .. private_key.len - 2 * SYMBYTES], public_key);
@@ -587,7 +647,7 @@ pub fn generate_keypair(allocator: std.mem.Allocator, algo: Algorithm) !KeyPair 
 
     // Add random z for rejection sampling
     var z: [SYMBYTES]u8 = undefined;
-    rng.randomBytes(&z);
+    fillRandom(drbg_ptr, &z);
     @memcpy(private_key[private_key.len - SYMBYTES ..], &z);
 
     return KeyPair{
@@ -595,6 +655,41 @@ pub fn generate_keypair(allocator: std.mem.Allocator, algo: Algorithm) !KeyPair 
         .private_key = private_key,
         .algorithm = algo,
     };
+}
+
+// Main Kyber functions
+pub fn generate_keypair(allocator: std.mem.Allocator, algo: Algorithm) !KeyPair {
+    return generate_keypair_internal(allocator, algo, null);
+}
+
+pub fn generate_keypair_deterministic(
+    allocator: std.mem.Allocator,
+    algo: Algorithm,
+    seed: []const u8,
+) !KeyPair {
+    return generate_keypair_internal(allocator, algo, seed);
+}
+
+test "kyber deterministic keygen stable" {
+    if (!(build_options.ml_kem_enabled or build_options.kyber_enabled)) return error.SkipZigTest;
+
+    const allocator = testing.allocator;
+    const seed = "kriptix/ml-kem/deterministic-seed";
+
+    var kp1 = try generate_keypair_deterministic(allocator, .Kyber768, seed);
+    defer {
+        allocator.free(kp1.public_key);
+        allocator.free(kp1.private_key);
+    }
+
+    var kp2 = try generate_keypair_deterministic(allocator, .Kyber768, seed);
+    defer {
+        allocator.free(kp2.public_key);
+        allocator.free(kp2.private_key);
+    }
+
+    try testing.expectEqualSlices(u8, kp1.public_key, kp2.public_key);
+    try testing.expectEqualSlices(u8, kp1.private_key, kp2.private_key);
 }
 
 pub fn encrypt(allocator: std.mem.Allocator, public_key: []const u8, message: []const u8, algo: Algorithm) !Ciphertext {
@@ -629,22 +724,66 @@ pub fn encrypt(allocator: std.mem.Allocator, public_key: []const u8, message: []
 }
 
 pub fn decrypt(allocator: std.mem.Allocator, private_key: []const u8, ciphertext: []const u8) ![]u8 {
-    const algo = Algorithm.Kyber512; // Simplified - would need to determine from key
+    const algo = try inferAlgorithm(private_key.len, ciphertext.len);
+    return try decapsulate(allocator, private_key, ciphertext, algo);
+}
+
+pub fn encapsulate(
+    allocator: std.mem.Allocator,
+    public_key: []const u8,
+    algo: Algorithm,
+) !struct { ciphertext: []u8, shared_secret: []u8 } {
+    if (public_key.len != publicKeyLength(algo)) return Error.InvalidPublicKeyLength;
+
+    const params = Params.fromAlgo(algo);
+    const ct_len = ciphertextLength(algo);
+
+    const ciphertext = try allocator.alloc(u8, ct_len);
+    errdefer allocator.free(ciphertext);
+
+    var buf: [2 * SYMBYTES]u8 = undefined;
+    rng.randomBytes(buf[0..SYMBYTES]);
+    hashH(buf[0..SYMBYTES], buf[0..SYMBYTES]);
+
+    hashH(buf[SYMBYTES..], public_key);
+    var kr: [2 * SYMBYTES]u8 = undefined;
+    hashG(&kr, &buf);
+
+    try indcpaEnc(allocator, params, ciphertext, buf[0..SYMBYTES], public_key, kr[SYMBYTES..]);
+
+    // Derive final shared secret
+    hashH(kr[SYMBYTES..], ciphertext);
+
+    var shared_secret_buf: [SSBYTES]u8 = undefined;
+    kdf(&shared_secret_buf, &kr);
+
+    const shared_secret = try allocator.alloc(u8, SSBYTES);
+    @memcpy(shared_secret, &shared_secret_buf);
+
+    return .{ .ciphertext = ciphertext, .shared_secret = shared_secret };
+}
+
+pub fn decapsulate(
+    allocator: std.mem.Allocator,
+    private_key: []const u8,
+    ciphertext: []const u8,
+    algo: Algorithm,
+) ![]u8 {
+    if (private_key.len != privateKeyLength(algo)) return Error.InvalidPrivateKeyLength;
+    if (ciphertext.len != ciphertextLength(algo)) return Error.InvalidCiphertextLength;
+
     const params = Params.fromAlgo(algo);
 
     var buf: [2 * SYMBYTES]u8 = undefined;
     var kr: [2 * SYMBYTES]u8 = undefined;
 
-    // Decrypt IND-CPA
     try indcpaDec(allocator, params, buf[0..SYMBYTES], ciphertext, private_key);
 
-    // Multitarget countermeasure
     @memcpy(buf[SYMBYTES..], private_key[private_key.len - 2 * SYMBYTES .. private_key.len - SYMBYTES]);
     hashG(&kr, &buf);
 
-    // Re-encrypt and check
     const pk_start = params.k * N * 2;
-    const pk_end = pk_start + params.k * N * 2 + SYMBYTES;
+    const pk_end = pk_start + publicKeyLength(algo);
     const pk = private_key[pk_start..pk_end];
 
     const cmp = try allocator.alloc(u8, ciphertext.len);
@@ -653,17 +792,23 @@ pub fn decrypt(allocator: std.mem.Allocator, private_key: []const u8, ciphertext
 
     const fail = verify(ciphertext, cmp, ciphertext.len);
 
-    // Update kr with hash of ciphertext
     hashH(kr[SYMBYTES..], ciphertext);
-
-    // Conditional move for rejection
     cmov(&kr, private_key[private_key.len - SYMBYTES ..], SYMBYTES, fail);
 
-    // Compute shared secret
     var ss: [SSBYTES]u8 = undefined;
     kdf(&ss, &kr);
 
     const result = try allocator.alloc(u8, SSBYTES);
     @memcpy(result, &ss);
     return result;
+}
+
+fn inferAlgorithm(private_len: usize, ciphertext_len: usize) !Algorithm {
+    inline for ([_]Algorithm{ .Kyber512, .Kyber768, .Kyber1024 }) |candidate| {
+        if (private_len == privateKeyLength(candidate) and ciphertext_len == ciphertextLength(candidate)) {
+            return candidate;
+        }
+    }
+
+    return Error.UnsupportedAlgorithm;
 }

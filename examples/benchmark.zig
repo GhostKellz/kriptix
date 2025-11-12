@@ -16,9 +16,11 @@ pub fn main() !void {
 
     // Benchmark Kyber
     try benchmarkKyber(allocator);
+    try benchmarkDeterministicKyber(allocator);
 
     // Benchmark Dilithium
     try benchmarkDilithium(allocator);
+    try benchmarkDeterministicDilithium(allocator);
 
     // Benchmark SPHINCS+
     try benchmarkSphincs(allocator);
@@ -34,10 +36,9 @@ fn benchmarkKyber(allocator: std.mem.Allocator) !void {
     var keys: [iterations]kriptix.KeyPair = undefined;
 
     for (0..iterations) |i| {
-        const start = std.time.nanoTimestamp();
+        var timer = try std.time.Timer.start();
         keys[i] = try kriptix.generate_keypair(allocator, .Kyber512);
-        const end = std.time.nanoTimestamp();
-        keygen_times[i] = @intCast(end - start);
+        keygen_times[i] = timer.read();
     }
 
     const avg_keygen = average(&keygen_times);
@@ -49,10 +50,9 @@ fn benchmarkKyber(allocator: std.mem.Allocator) !void {
     const message = "Benchmark test message";
 
     for (0..iterations) |i| {
-        const start = std.time.nanoTimestamp();
+        var timer = try std.time.Timer.start();
         ciphertexts[i] = try kriptix.encrypt(allocator, keys[i].public_key, message, .Kyber512);
-        const end = std.time.nanoTimestamp();
-        enc_times[i] = @intCast(end - start);
+        enc_times[i] = timer.read();
     }
 
     const avg_enc = average(&enc_times);
@@ -62,10 +62,9 @@ fn benchmarkKyber(allocator: std.mem.Allocator) !void {
     var dec_times: [iterations]u64 = undefined;
 
     for (0..iterations) |i| {
-        const start = std.time.nanoTimestamp();
+        var timer = try std.time.Timer.start();
         const decrypted = try kriptix.decrypt(allocator, keys[i].private_key, ciphertexts[i]);
-        const end = std.time.nanoTimestamp();
-        dec_times[i] = @intCast(end - start);
+        dec_times[i] = timer.read();
         allocator.free(decrypted);
     }
 
@@ -82,6 +81,42 @@ fn benchmarkKyber(allocator: std.mem.Allocator) !void {
     }
 }
 
+fn benchmarkDeterministicKyber(allocator: std.mem.Allocator) !void {
+    std.debug.print("Benchmarking deterministic Kyber key generation...\n", .{});
+
+    const iterations = 10;
+    var keygen_times: [iterations]u64 = undefined;
+    var keys: [iterations]kriptix.KeyPair = undefined;
+
+    for (0..iterations) |i| {
+        var seed_buf: [64]u8 = undefined;
+        const seed = try std.fmt.bufPrint(&seed_buf, "kriptix::det-seed::kyber::{d}", .{i});
+
+        var timer = try std.time.Timer.start();
+        keys[i] = try kriptix.generate_keypair_deterministic(allocator, .Kyber512, seed);
+        keygen_times[i] = timer.read();
+
+        const control = try kriptix.generate_keypair_deterministic(allocator, .Kyber512, seed);
+
+        if (!std.mem.eql(u8, keys[i].public_key, control.public_key) or
+            !std.mem.eql(u8, keys[i].private_key, control.private_key))
+        {
+            std.debug.print("  Warning: Deterministic Kyber mismatch for seed index {d}\n", .{i});
+        }
+
+        allocator.free(control.public_key);
+        allocator.free(control.private_key);
+    }
+
+    const avg_keygen = average(&keygen_times);
+    std.debug.print("  Deterministic keygen: {d:.2} ms\n", .{avg_keygen / 1_000_000.0});
+
+    for (keys) |key| {
+        allocator.free(key.public_key);
+        allocator.free(key.private_key);
+    }
+}
+
 fn benchmarkDilithium(allocator: std.mem.Allocator) !void {
     std.debug.print("Benchmarking Dilithium signature operations...\n", .{});
 
@@ -92,10 +127,9 @@ fn benchmarkDilithium(allocator: std.mem.Allocator) !void {
     var keys: [iterations]kriptix.KeyPair = undefined;
 
     for (0..iterations) |i| {
-        const start = std.time.nanoTimestamp();
+        var timer = try std.time.Timer.start();
         keys[i] = try kriptix.generate_keypair(allocator, .Dilithium2);
-        const end = std.time.nanoTimestamp();
-        keygen_times[i] = @intCast(end - start);
+        keygen_times[i] = timer.read();
     }
 
     const avg_keygen = average(&keygen_times);
@@ -107,10 +141,9 @@ fn benchmarkDilithium(allocator: std.mem.Allocator) !void {
     const message = "Benchmark test message for Dilithium signatures";
 
     for (0..iterations) |i| {
-        const start = std.time.nanoTimestamp();
+        var timer = try std.time.Timer.start();
         signatures[i] = try kriptix.sign(allocator, keys[i].private_key, message, .Dilithium2);
-        const end = std.time.nanoTimestamp();
-        sign_times[i] = @intCast(end - start);
+        sign_times[i] = timer.read();
     }
 
     const avg_sign = average(&sign_times);
@@ -120,10 +153,9 @@ fn benchmarkDilithium(allocator: std.mem.Allocator) !void {
     var verify_times: [iterations]u64 = undefined;
 
     for (0..iterations) |i| {
-        const start = std.time.nanoTimestamp();
+        var timer = try std.time.Timer.start();
         const is_valid = try kriptix.verify(keys[i].public_key, message, signatures[i]);
-        const end = std.time.nanoTimestamp();
-        verify_times[i] = @intCast(end - start);
+        verify_times[i] = timer.read();
 
         if (!is_valid) {
             std.debug.print("  Warning: Signature verification failed!\n", .{});
@@ -143,6 +175,42 @@ fn benchmarkDilithium(allocator: std.mem.Allocator) !void {
     }
 }
 
+fn benchmarkDeterministicDilithium(allocator: std.mem.Allocator) !void {
+    std.debug.print("Benchmarking deterministic Dilithium key generation...\n", .{});
+
+    const iterations = 5;
+    var keygen_times: [iterations]u64 = undefined;
+    var keys: [iterations]kriptix.KeyPair = undefined;
+
+    for (0..iterations) |i| {
+        var seed_buf: [64]u8 = undefined;
+        const seed = try std.fmt.bufPrint(&seed_buf, "kriptix::det-seed::dilithium::{d}", .{i});
+
+        var timer = try std.time.Timer.start();
+        keys[i] = try kriptix.generate_keypair_deterministic(allocator, .Dilithium2, seed);
+        keygen_times[i] = timer.read();
+
+        const control = try kriptix.generate_keypair_deterministic(allocator, .Dilithium2, seed);
+
+        if (!std.mem.eql(u8, keys[i].public_key, control.public_key) or
+            !std.mem.eql(u8, keys[i].private_key, control.private_key))
+        {
+            std.debug.print("  Warning: Deterministic Dilithium mismatch for seed index {d}\n", .{i});
+        }
+
+        allocator.free(control.public_key);
+        allocator.free(control.private_key);
+    }
+
+    const avg_keygen = average(&keygen_times);
+    std.debug.print("  Deterministic keygen: {d:.2} ms\n", .{avg_keygen / 1_000_000.0});
+
+    for (keys) |key| {
+        allocator.free(key.public_key);
+        allocator.free(key.private_key);
+    }
+}
+
 fn benchmarkSphincs(allocator: std.mem.Allocator) !void {
     std.debug.print("Benchmarking SPHINCS+ signature operations...\n", .{});
 
@@ -153,10 +221,9 @@ fn benchmarkSphincs(allocator: std.mem.Allocator) !void {
     var keys: [iterations]kriptix.KeyPair = undefined;
 
     for (0..iterations) |i| {
-        const start = std.time.nanoTimestamp();
+        var timer = try std.time.Timer.start();
         keys[i] = try kriptix.generate_keypair(allocator, .Sphincs128f);
-        const end = std.time.nanoTimestamp();
-        keygen_times[i] = @intCast(end - start);
+        keygen_times[i] = timer.read();
     }
 
     const avg_keygen = average(&keygen_times);
@@ -168,10 +235,9 @@ fn benchmarkSphincs(allocator: std.mem.Allocator) !void {
     const message = "Benchmark test message for SPHINCS+ signatures";
 
     for (0..iterations) |i| {
-        const start = std.time.nanoTimestamp();
+        var timer = try std.time.Timer.start();
         signatures[i] = try kriptix.sign(allocator, keys[i].private_key, message, .Sphincs128f);
-        const end = std.time.nanoTimestamp();
-        sign_times[i] = @intCast(end - start);
+        sign_times[i] = timer.read();
     }
 
     const avg_sign = average(&sign_times);
@@ -181,10 +247,9 @@ fn benchmarkSphincs(allocator: std.mem.Allocator) !void {
     var verify_times: [iterations]u64 = undefined;
 
     for (0..iterations) |i| {
-        const start = std.time.nanoTimestamp();
+        var timer = try std.time.Timer.start();
         const is_valid = try kriptix.verify(keys[i].public_key, message, signatures[i]);
-        const end = std.time.nanoTimestamp();
-        verify_times[i] = @intCast(end - start);
+        verify_times[i] = timer.read();
 
         if (!is_valid) {
             std.debug.print("  Warning: Signature verification failed!\n", .{});

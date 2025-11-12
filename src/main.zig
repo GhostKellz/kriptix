@@ -2,7 +2,6 @@ const std = @import("std");
 const kriptix = @import("kriptix");
 
 pub fn main() !void {
-    // Prints to stderr, ignoring potential errors.
     std.debug.print("Kriptix - Post-Quantum Cryptography Library\n", .{});
 
     // Initialize the library
@@ -14,15 +13,41 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    // Generate a Kyber keypair
-    const keypair = try kriptix.generate_keypair(allocator, .Kyber512);
-    defer allocator.free(keypair.public_key);
-    defer allocator.free(keypair.private_key);
+    // Try to use modular API first (available in all builds)
+    if (@hasDecl(kriptix, "modules")) {
+        std.debug.print("Using modular API:\n", .{});
 
-    std.debug.print("Generated Kyber512 keypair: pub={}, priv={}\n", .{
-        keypair.public_key.len,
-        keypair.private_key.len,
-    });
+        // Use ML-KEM if available
+        if (@hasDecl(kriptix.modules, "ml_kem") and @hasDecl(kriptix.modules.ml_kem, "MlKem512")) {
+            const ml_kem = kriptix.modules.ml_kem;
+            const keypair = try ml_kem.MlKem512.keygen(allocator);
+            defer allocator.free(keypair.public_key);
+            defer allocator.free(keypair.private_key);
+
+            std.debug.print("Generated ML-KEM-512 keypair: pub={}, priv={}\n", .{
+                keypair.public_key.len,
+                keypair.private_key.len,
+            });
+            return;
+        }
+
+        // Use ML-DSA if available
+        if (@hasDecl(kriptix.modules, "ml_dsa") and @hasDecl(kriptix.modules.ml_dsa, "MlDsa44")) {
+            const ml_dsa = kriptix.modules.ml_dsa;
+            const keypair = try ml_dsa.MlDsa44.keygen(allocator);
+            defer keypair.deinit(allocator);
+
+            std.debug.print("Generated ML-DSA-44 keypair: pub={}, priv={}\n", .{
+                keypair.public_key.len,
+                keypair.private_key.len,
+            });
+            return;
+        }
+
+        std.debug.print("No algorithms enabled. Use -Dml-kem=true, -Dml-dsa=true, etc.\n", .{});
+    } else {
+        std.debug.print("Modules not available - this shouldn't happen.\n", .{});
+    }
 }
 
 test "simple test" {

@@ -76,6 +76,7 @@ Initialize and cleanup global library state. Call `init()` once at startup and `
 
 ```zig
 pub fn generate_keypair(allocator: std.mem.Allocator, algo: Algorithm) !KeyPair
+pub fn generate_keypair_deterministic(allocator: std.mem.Allocator, algo: Algorithm, seed: []const u8) !KeyPair
 ```
 
 Generate a new keypair for the specified algorithm.
@@ -92,6 +93,17 @@ const keypair = try kriptix.generate_keypair(allocator, .Kyber512);
 defer allocator.free(keypair.public_key);
 defer allocator.free(keypair.private_key);
 ```
+
+Deterministic key generation derives the same keypair from the same seed (supported for Kyber and Dilithium families plus classical Ed25519 backing keys used by hybrid helpers):
+
+```zig
+const seed = "ghostchain::validator-001";
+const deterministic = try kriptix.generate_keypair_deterministic(allocator, .Kyber768, seed);
+defer allocator.free(deterministic.public_key);
+defer allocator.free(deterministic.private_key);
+```
+
+> Returns `error.UnsupportedAlgorithm` when deterministic derivation is not available for the requested algorithm (for example SPHINCS+ or hybrid wrapper identifiers).
 
 ### Key Encapsulation
 
@@ -225,3 +237,9 @@ All functions return `!T` (error union types). Common errors:
 - Key generation and signing are the most expensive operations
 - Consider caching public keys for repeated encryption operations
 - Hybrid schemes may offer better performance during transition periods
+
+## Benchmark Harness
+
+- Enable the suite with `zig build -Dbenchmarks=true bench`
+- Measures Kyber KEM, Dilithium signing, and SPHINCS+ signature performance
+- Includes deterministic Kyber/Dilithium keygen runs that verify seeded reproducibility alongside timing data

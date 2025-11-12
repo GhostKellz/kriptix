@@ -14,6 +14,7 @@ Kriptix provides a comprehensive suite of post-quantum cryptographic primitives 
 - **Hybrid Cryptography**: PQC + Classical combinations for transition security
 - **Zig Native**: Zero-cost abstractions with compile-time safety
 - **Multi-Target**: Library, FFI bindings, and WebAssembly support
+- **Deterministic Keygen**: Seed-driven derivations for PQC, Ed25519, and hybrid bundles
 - **Extensible**: Modular design for easy integration
 
 ## Quick Start
@@ -41,6 +42,12 @@ defer allocator.free(ciphertext.data);
 
 const decrypted = try kriptix.decrypt(allocator, keypair.private_key, ciphertext);
 defer allocator.free(decrypted);
+
+// Deterministic seed-based key generation
+const seed = "ghostchain::demo-seed";
+const deterministic = try kriptix.generate_keypair_deterministic(allocator, .Kyber512, seed);
+defer allocator.free(deterministic.public_key);
+defer allocator.free(deterministic.private_key);
 ```
 
 ## Building
@@ -60,6 +67,36 @@ zig build test
 
 # Run the CLI demo
 zig build run
+
+# Run benchmarks (enable benchmark feature)
+zig build -Dbenchmarks=true bench
+# → collects Kyber/Dilithium performance plus deterministic seed verification output
+```
+
+### Build Options
+
+| Flag | Default | Description |
+| --- | --- | --- |
+| `-Dml-kem` | `false` | Enable ML-KEM (Kyber) key encapsulation |
+| `-Dkyber` | `false` | Enable legacy Kyber module (pre-FIPS) |
+| `-Dml-dsa` | `false` | Enable ML-DSA (Dilithium) signatures |
+| `-Ddilithium` | `false` | Enable legacy Dilithium module (pre-FIPS) |
+| `-Dslh-dsa` | `false` | Enable SLH-DSA (FIPS 205) signatures |
+| `-Dsphincs` | `false` | Enable SLH-DSA (SPHINCS+) signatures |
+| `-Dhybrid` | `false` | Build hybrid PQC + classical manager |
+| `-Dblockchain` | `false` | Include blockchain integration modules |
+| `-Dinterop` | `false` | Compile interoperability utilities |
+| `-Dbenchmarks` | `false` | Compile benchmark harness and enable `zig build bench` |
+| `-Dtests` | `false` | Compile unit/integration tests |
+| `-Dexamples` | `false` | Compile example binaries |
+| `-Dall-features` | `false` | Convenience toggle that enables every feature flag |
+| `-Dminimal` | `false` | Strip optional modules for the smallest footprint |
+| `-Dfast-build` | `false` | Prefer faster builds over peak runtime performance |
+
+Example Ghostchain build:
+
+```bash
+zig build -Dml-kem=true -Dml-dsa=true -Dhybrid=true -Dtests=true
 ```
 
 ## Project Structure
@@ -72,11 +109,13 @@ zig build run
   - `dilithium.zig` - Dilithium signatures
   - `sphincs.zig` - SPHINCS+ signatures
   - `hybrid.zig` - Hybrid schemes
+- `src/hybrid/manager.zig` - Deterministic hybrid manager (PQC + classical)
+- `src/ghostchain.zig` - Ghostchain integration helpers with seeded keygen
+- `examples/benchmark.zig` - Benchmark harness entry point
 
 ## Dependencies
 
-- `zcrypto` - Classical cryptography primitives
-- `zsync` - Async I/O library
+Kriptix is self-contained. All cryptographic primitives build directly on Zig's standard library and local modules—no external packages required.
 
 ## Roadmap
 

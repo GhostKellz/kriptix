@@ -132,24 +132,25 @@ pub const HDKeyManager = struct {
         };
     }
 
-    /// Generate keypair from seed (simplified - would use algorithm-specific derivation)
+    /// Generate keypair from seed (prefers algorithm-specific deterministic derivation)
     fn generate_keypair_from_seed(self: *HDKeyManager, seed: [64]u8) !KeyPair {
-        // This is a simplified version - real implementation would use
-        // algorithm-specific deterministic key generation
+    const seed_slice = @as([]const u8, seed[0..]);
 
-        const pk_size = get_public_key_size(self.algorithm);
-        const sk_size = get_private_key_size(self.algorithm);
+        return root.generate_keypair_deterministic(self.allocator, self.algorithm, seed_slice) catch |err| switch (err) {
+            error.UnsupportedAlgorithm => blk: {
+                const pk_size = get_public_key_size(self.algorithm);
+                const sk_size = get_private_key_size(self.algorithm);
 
-        // Derive public key
-        const public_key = try security.SecureKeyDerivation.derive_key(self.allocator, &seed, "public", "pqc_pk", pk_size);
+                const public_key = try security.SecureKeyDerivation.derive_key(self.allocator, &seed, "public", "pqc_pk", pk_size);
+                const private_key = try security.SecureKeyDerivation.derive_key(self.allocator, &seed, "private", "pqc_sk", sk_size);
 
-        // Derive private key
-        const private_key = try security.SecureKeyDerivation.derive_key(self.allocator, &seed, "private", "pqc_sk", sk_size);
-
-        return KeyPair{
-            .public_key = public_key,
-            .private_key = private_key,
-            .algorithm = self.algorithm,
+                break :blk KeyPair{
+                    .public_key = public_key,
+                    .private_key = private_key,
+                    .algorithm = self.algorithm,
+                };
+            },
+            else => return err,
         };
     }
 
@@ -369,7 +370,7 @@ pub const KeyBackupManager = struct {
         var pos: usize = 0;
 
         // Public key length
-        std.mem.writeInt(u32, serialized[pos..pos + 4][0..4], @as(u32, @intCast(keypair.public_key.len)), .little);
+        std.mem.writeInt(u32, serialized[pos .. pos + 4][0..4], @as(u32, @intCast(keypair.public_key.len)), .little);
         pos += 4;
 
         // Public key data
@@ -377,7 +378,7 @@ pub const KeyBackupManager = struct {
         pos += keypair.public_key.len;
 
         // Private key length
-        std.mem.writeInt(u32, serialized[pos..pos + 4][0..4], @as(u32, @intCast(keypair.private_key.len)), .little);
+        std.mem.writeInt(u32, serialized[pos .. pos + 4][0..4], @as(u32, @intCast(keypair.private_key.len)), .little);
         pos += 4;
 
         // Private key data
@@ -393,7 +394,7 @@ pub const KeyBackupManager = struct {
         var pos: usize = 0;
 
         // Read public key
-        const pk_len = std.mem.readInt(u32, data[pos..pos + 4][0..4], .little);
+        const pk_len = std.mem.readInt(u32, data[pos .. pos + 4][0..4], .little);
         pos += 4;
 
         if (pos + pk_len > data.len) return error.InvalidBackupData;
@@ -407,7 +408,7 @@ pub const KeyBackupManager = struct {
             return error.InvalidBackupData;
         }
 
-        const sk_len = std.mem.readInt(u32, data[pos..pos + 4][0..4], .little);
+        const sk_len = std.mem.readInt(u32, data[pos .. pos + 4][0..4], .little);
         pos += 4;
 
         if (pos + sk_len > data.len) {
@@ -494,19 +495,28 @@ test "key path parsing" {
 
 test "hd key manager" {
     const seed = [_]u8{0x42} ** 64;
-    var hd_manager = HDKeyManager.init(testing.allocator, seed, .Kyber512);
-    defer hd_manager.deinit();
+    var hd_manager_a = HDKeyManager.init(testing.allocator, seed, .Kyber512);
+    defer hd_manager_a.deinit();
+    var hd_manager_b = HDKeyManager.init(testing.allocator, seed, .Kyber512);
+    defer hd_manager_b.deinit();
 
     const path = try KeyPath.init(testing.allocator, "m/44'/1'/0'/0/0");
     defer path.deinit(testing.allocator);
 
-    const keypair = try hd_manager.derive_key(path);
-    defer testing.allocator.free(keypair.public_key);
-    defer testing.allocator.free(keypair.private_key);
+    const keypair_a = try hd_manager_a.derive_key(path);
+    defer testing.allocator.free(keypair_a.public_key);
+    defer testing.allocator.free(keypair_a.private_key);
 
-    try testing.expect(keypair.public_key.len == 800);
-    try testing.expect(keypair.private_key.len == 1632);
-    try testing.expect(keypair.algorithm == .Kyber512);
+    const keypair_b = try hd_manager_b.derive_key(path);
+    defer testing.allocator.free(keypair_b.public_key);
+    defer testing.allocator.free(keypair_b.private_key);
+
+    try testing.expect(keypair_a.public_key.len == 800);
+    try testing.expect(keypair_a.private_key.len == 1632);
+    try testing.expect(keypair_a.algorithm == .Kyber512);
+
+    try testing.expectEqualSlices(u8, keypair_a.public_key, keypair_b.public_key);
+    try testing.expectEqualSlices(u8, keypair_a.private_key, keypair_b.private_key);
 }
 
 test "backup and restore" {

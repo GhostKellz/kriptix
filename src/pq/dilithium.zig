@@ -5,6 +5,10 @@
 const std = @import("std");
 const rng = @import("../rng.zig");
 const hash = @import("../hash.zig");
+const build_options = @import("build_options");
+
+const blake3 = std.crypto.hash.Blake3;
+const testing = std.testing;
 
 const Algorithm = @import("../root.zig").Algorithm;
 
@@ -231,9 +235,13 @@ fn barrett_reduce(x: i64) i32 {
 
 fn montgomery_reduce(x: i64) i32 {
     // Montgomery reduction: compute aR^-1 mod Q
-    var t: i64 = @as(i64, @intCast(@as(u32, @intCast(x)) * MONT_R_INV));
-    t = (x - t * Q) >> 32;
-    return @intCast(t);
+    const x_bits: u64 = @bitCast(x);
+    const x_low = @as(u32, @truncate(x_bits));
+    const product = @as(u64, x_low) * @as(u64, MONT_R_INV);
+    const t_low = @as(u32, @truncate(product));
+    const t = @as(i64, @intCast(t_low));
+    const reduced = (x - t * Q) >> 32;
+    return @intCast(reduced);
 }
 
 fn mod_q_signed(x: i64) i32 {
@@ -459,8 +467,19 @@ fn expand_matrix(rho: []const u8, params: DilithiumParams, A: *[8][7]Poly) void 
     }
 }
 
-/// Generate ML-DSA keypair following FIPS 204 specification
-pub fn generate_keypair(allocator: std.mem.Allocator, algo: Algorithm) !KeyPair {
+fn expand_seed(seed: ?[]const u8, out: *[32]u8) void {
+    if (seed) |s| {
+        blake3.hash(s, out, .{});
+    } else {
+        rng.randomBytes(out);
+    }
+}
+
+fn generate_keypair_internal(
+    allocator: std.mem.Allocator,
+    algo: Algorithm,
+    seed: ?[]const u8,
+) !KeyPair {
     const params = get_params(algo);
 
     // Allocate key storage
@@ -469,7 +488,7 @@ pub fn generate_keypair(allocator: std.mem.Allocator, algo: Algorithm) !KeyPair 
 
     // Step 1: Generate random seed ξ (32 bytes)
     var xi: [32]u8 = undefined;
-    rng.randomBytes(&xi);
+    expand_seed(seed, &xi);
 
     // Step 2: Expand seed using SHAKE-256 to get (ρ, ρ', K)
     var hasher = hash.Hasher.init(.Blake3);
@@ -564,6 +583,43 @@ pub fn generate_keypair(allocator: std.mem.Allocator, algo: Algorithm) !KeyPair 
         .private_key = private_key,
         .algorithm = algo,
     };
+}
+
+/// Generate ML-DSA keypair following FIPS 204 specification using system randomness
+pub fn generate_keypair(allocator: std.mem.Allocator, algo: Algorithm) !KeyPair {
+    return generate_keypair_internal(allocator, algo, null);
+}
+
+/// Deterministically derive an ML-DSA keypair from caller-provided seed material.
+/// The seed may be any length; it is hashed with BLAKE3 to obtain the 32-byte ξ value.
+pub fn generate_keypair_deterministic(
+    allocator: std.mem.Allocator,
+    algo: Algorithm,
+    seed: []const u8,
+) !KeyPair {
+    return generate_keypair_internal(allocator, algo, seed);
+}
+
+test "dilithium deterministic keygen stable" {
+    if (!(build_options.ml_dsa_enabled or build_options.dilithium_enabled)) return error.SkipZigTest;
+
+    const allocator = testing.allocator;
+    const seed = "kriptix/ml-dsa/deterministic-seed";
+
+    var kp1 = try generate_keypair_deterministic(allocator, .Dilithium2, seed);
+    defer {
+        allocator.free(kp1.public_key);
+        allocator.free(kp1.private_key);
+    }
+
+    var kp2 = try generate_keypair_deterministic(allocator, .Dilithium2, seed);
+    defer {
+        allocator.free(kp2.public_key);
+        allocator.free(kp2.private_key);
+    }
+
+    try testing.expectEqualSlices(u8, kp1.public_key, kp2.public_key);
+    try testing.expectEqualSlices(u8, kp1.private_key, kp2.private_key);
 }
 
 /// Sign a message using Dilithium

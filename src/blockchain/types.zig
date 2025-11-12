@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const kriptix = @import("../root.zig");
+const hybrid_types = @import("hybrid_types.zig");
 
 /// Transaction Input
 pub const TxInput = struct {
@@ -19,6 +20,12 @@ pub const TxInput = struct {
 
     /// Public key of the spender
     public_key: []const u8,
+
+    /// Optional hybrid public key record for classical interoperability
+    hybrid_public_key: ?hybrid_types.HybridPublicKeyRecord = null,
+
+    /// Optional hybrid signature bundle for this input
+    hybrid_signature: ?hybrid_types.HybridSignatureRecord = null,
 
     /// Algorithm used for the signature
     signature_algorithm: kriptix.Algorithm,
@@ -45,6 +52,17 @@ pub const TxInput = struct {
         hasher.final(&result);
         return result;
     }
+
+    pub fn deinit(self: *TxInput, allocator: std.mem.Allocator) void {
+        if (self.hybrid_public_key) |*record| {
+            record.deinit(allocator);
+            self.hybrid_public_key = null;
+        }
+        if (self.hybrid_signature) |*signature| {
+            signature.deinit(allocator);
+            self.hybrid_signature = null;
+        }
+    }
 };
 
 /// Transaction Output
@@ -60,6 +78,9 @@ pub const TxOutput = struct {
 
     /// Optional script/contract data
     script: ?[]const u8 = null,
+
+    /// Optional hybrid public key record for the recipient
+    hybrid_public_key: ?hybrid_types.HybridPublicKeyRecord = null,
 
     pub fn init(amount: u64, recipient_pubkey: []const u8, pubkey_algo: kriptix.Algorithm) TxOutput {
         return TxOutput{
@@ -82,6 +103,13 @@ pub const TxOutput = struct {
         var result: [32]u8 = undefined;
         hasher.final(&result);
         return result;
+    }
+
+    pub fn deinit(self: *TxOutput, allocator: std.mem.Allocator) void {
+        if (self.hybrid_public_key) |*record| {
+            record.deinit(allocator);
+            self.hybrid_public_key = null;
+        }
     }
 };
 
@@ -114,6 +142,12 @@ pub const Transaction = struct {
     /// Algorithm used for transaction signature
     signature_algorithm: kriptix.Algorithm,
 
+    /// Optional hybrid signature for the transaction
+    hybrid_signature: ?hybrid_types.HybridSignatureRecord = null,
+
+    /// Optional hybrid public key that signed the transaction
+    hybrid_public_key: ?hybrid_types.HybridPublicKeyRecord = null,
+
     pub fn init(allocator: std.mem.Allocator, inputs: []TxInput, outputs: []TxOutput, fee: u64, nonce: u64, sig_algo: kriptix.Algorithm) !Transaction {
         var tx = Transaction{
             .inputs = try allocator.dupe(TxInput, inputs),
@@ -125,6 +159,25 @@ pub const Transaction = struct {
             .signature = &[_]u8{}, // Will be set after signing
             .signature_algorithm = sig_algo,
         };
+        errdefer tx.deinit(allocator);
+
+        for (tx.inputs, 0..) |*input, idx| {
+            input.hybrid_public_key = null;
+            input.hybrid_signature = null;
+            if (inputs[idx].hybrid_public_key) |record| {
+                input.hybrid_public_key = try record.clone(allocator);
+            }
+            if (inputs[idx].hybrid_signature) |signature_record| {
+                input.hybrid_signature = try signature_record.clone(allocator);
+            }
+        }
+
+        for (tx.outputs, 0..) |*output, idx| {
+            output.hybrid_public_key = null;
+            if (outputs[idx].hybrid_public_key) |record| {
+                output.hybrid_public_key = try record.clone(allocator);
+            }
+        }
 
         // Calculate transaction hash
         tx.hash = try tx.calculate_hash(allocator);
@@ -132,10 +185,25 @@ pub const Transaction = struct {
     }
 
     pub fn deinit(self: *Transaction, allocator: std.mem.Allocator) void {
+        for (self.inputs) |*input| {
+            input.deinit(allocator);
+        }
         allocator.free(self.inputs);
+
+        for (self.outputs) |*output| {
+            output.deinit(allocator);
+        }
         allocator.free(self.outputs);
         if (self.signature.len > 0) {
             allocator.free(self.signature);
+        }
+        if (self.hybrid_signature) |*signature_record| {
+            signature_record.deinit(allocator);
+            self.hybrid_signature = null;
+        }
+        if (self.hybrid_public_key) |*pk_record| {
+            pk_record.deinit(allocator);
+            self.hybrid_public_key = null;
         }
     }
 
@@ -212,6 +280,12 @@ pub const BlockHeader = struct {
     /// Algorithm used for block signature
     signature_algorithm: kriptix.Algorithm = .Dilithium3,
 
+    /// Optional hybrid signature information for the block
+    hybrid_signature: ?hybrid_types.HybridSignatureRecord = null,
+
+    /// Optional hybrid public key for the validator
+    hybrid_public_key: ?hybrid_types.HybridPublicKeyRecord = null,
+
     /// Additional metadata
     difficulty: u64 = 0, // For future use
     validator_id: ?[32]u8 = null, // ID of the validator who created this block
@@ -276,6 +350,14 @@ pub const Block = struct {
         allocator.free(self.transactions);
         if (self.header.signature.len > 0) {
             allocator.free(self.header.signature);
+        }
+        if (self.header.hybrid_signature) |*signature_record| {
+            signature_record.deinit(allocator);
+            self.header.hybrid_signature = null;
+        }
+        if (self.header.hybrid_public_key) |*pk_record| {
+            pk_record.deinit(allocator);
+            self.header.hybrid_public_key = null;
         }
     }
 

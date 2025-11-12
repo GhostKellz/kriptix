@@ -109,7 +109,7 @@ pub const Blockchain = struct {
         }
 
         // Validate block signature using PQC
-        try crypto.verify_block_signature(block, self.config.block_signature_algorithm);
+    try crypto.verify_block_signature(self.allocator, &block);
     }
 
     /// Validate a transaction
@@ -119,7 +119,7 @@ pub const Blockchain = struct {
         if (transaction.outputs.len == 0) return BlockchainError.InvalidTransaction;
 
         // Validate transaction signature using PQC
-        try crypto.verify_transaction_signature(transaction, self.config.transaction_signature_algorithm);
+    try crypto.verify_transaction_signature(self.allocator, &transaction);
 
         // Validate against current state
         try self.state.validate_transaction(transaction);

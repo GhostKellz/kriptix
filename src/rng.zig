@@ -4,14 +4,14 @@
 const std = @import("std");
 const crypto = std.crypto;
 
-// Global RNG state
-var rng: std.Random.DefaultPrng = undefined;
 var initialized = false;
 
-/// Initialize the RNG system
+/// Initialize the RNG system (idempotent)
 pub fn init() void {
     if (!initialized) {
-        rng = std.Random.DefaultPrng.init(0x123456789ABCDEF0);
+        // Warm up std.crypto random; no explicit state required.
+        var probe: [8]u8 = undefined;
+        crypto.random.bytes(&probe);
         initialized = true;
     }
 }
@@ -23,22 +23,22 @@ pub fn deinit() void {
 
 /// Fill a buffer with cryptographically secure random bytes
 pub fn randomBytes(buf: []u8) void {
-    rng.fill(buf);
+    crypto.random.bytes(buf);
 }
 
 /// Generate a random u64
 pub fn randomU64() u64 {
-    return rng.random().uintAtMost(u64, std.math.maxInt(u64));
+    return crypto.random.int(u64);
 }
 
 /// Generate a random u32
 pub fn randomU32() u32 {
-    return rng.random().uintAtMost(u32, std.math.maxInt(u32));
+    return crypto.random.int(u32);
 }
 
 /// Generate a random integer of type T
 pub fn randomInt(comptime T: type) T {
-    return rng.random().uintAtMost(T, std.math.maxInt(T));
+    return crypto.random.int(T);
 }
 
 /// DRBG (Deterministic Random Bit Generator) for reproducible randomness

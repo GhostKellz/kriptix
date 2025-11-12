@@ -316,7 +316,7 @@ pub const BenchmarkSuite = struct {
             const keygen_end = time.nanoTimestamp();
 
             total_memory += hybrid_kem.kyber_keypair.public_key.len + hybrid_kem.kyber_keypair.private_key.len;
-            total_memory += hybrid_kem.ecdh_keypair.public_key.len + hybrid_kem.ecdh_keypair.private_key.len;
+            total_memory += hybrid_kem.x25519_keypair.public_key.len + hybrid_kem.x25519_keypair.private_key.len;
 
             // Benchmark encapsulation
             const encap_start = time.nanoTimestamp();
@@ -376,7 +376,7 @@ pub const BenchmarkSuite = struct {
             const keygen_end = time.nanoTimestamp();
 
             total_memory += hybrid_sig.dilithium_keypair.public_key.len + hybrid_sig.dilithium_keypair.private_key.len;
-            total_memory += hybrid_sig.ecdsa_keypair.public_key.len + hybrid_sig.ecdsa_keypair.private_key.len;
+            total_memory += hybrid_sig.ed25519_keypair.public_key.len + hybrid_sig.ed25519_keypair.private_key.len;
 
             // Benchmark signing
             const sign_start = time.nanoTimestamp();

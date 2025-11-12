@@ -1,46 +1,142 @@
 const std = @import("std");
 
-// Although this function looks imperative, it does not perform the build
-// directly and instead it mutates the build graph (`b`) that will be then
-// executed by an external runner. The functions in `std.Build` implement a DSL
-// for defining build steps and express dependencies between them, allowing the
-// build runner to parallelize the build automatically (and the cache system to
-// know when a step doesn't need to be re-run).
 pub fn build(b: *std.Build) void {
-    // Standard target options allow the person running `zig build` to choose
-    // what target to build for. Here we do not override the defaults, which
-    // means any target is allowed, and the default is native. Other options
-    // for restricting supported target set are available.
     const target = b.standardTargetOptions(.{});
-    // Standard optimization options allow the person running `zig build` to select
-    // between Debug, ReleaseSafe, ReleaseFast, and ReleaseSmall. Here we do not
-    // set a preferred release mode, allowing the user to decide how to optimize.
     const optimize = b.standardOptimizeOption(.{});
 
-    // Optional features
+    // === FEATURE FLAGS FOR MODULAR COMPILATION ===
+    const features = .{
+        // Post-Quantum Key Encapsulation Mechanisms
+        .ml_kem = b.option(bool, "ml-kem", "Enable ML-KEM (FIPS 203)") orelse false,
+        .kyber = b.option(bool, "kyber", "Enable Kyber (legacy)") orelse false,
+
+        // Post-Quantum Digital Signatures
+        .ml_dsa = b.option(bool, "ml-dsa", "Enable ML-DSA (FIPS 204)") orelse false,
+        .dilithium = b.option(bool, "dilithium", "Enable Dilithium (legacy)") orelse false,
+        .slh_dsa = b.option(bool, "slh-dsa", "Enable SLH-DSA (FIPS 205)") orelse false,
+        .sphincs = b.option(bool, "sphincs", "Enable SPHINCS+ (legacy)") orelse false,
+
+        // Hybrid Schemes
+        .hybrid = b.option(bool, "hybrid", "Enable hybrid PQC+Classical schemes") orelse false,
+
+        // Additional Features
+        .blockchain = b.option(bool, "blockchain", "Enable blockchain-specific features") orelse false,
+        .interop = b.option(bool, "interop", "Enable interoperability features") orelse false,
+        .benchmarks = b.option(bool, "benchmarks", "Build benchmark suite") orelse false,
+        .tests = b.option(bool, "tests", "Build and run tests") orelse false,
+        .examples = b.option(bool, "examples", "Build example programs") orelse false,
+
+        // Build Options
+        .all_features = b.option(bool, "all-features", "Enable all features") orelse false,
+        .minimal = b.option(bool, "minimal", "Minimal build (core only)") orelse false,
+        .fast_build = b.option(bool, "fast-build", "Optimize for build speed") orelse false,
+    };
+
+    // Apply feature combinations
+    const final_features = struct {
+        ml_kem: bool,
+        kyber: bool,
+        ml_dsa: bool,
+        dilithium: bool,
+        slh_dsa: bool,
+        sphincs: bool,
+        hybrid: bool,
+        blockchain: bool,
+        interop: bool,
+        benchmarks: bool,
+        tests: bool,
+        examples: bool,
+        minimal: bool,
+    }{
+        .ml_kem = if (features.all_features or features.benchmarks) true else features.ml_kem,
+        .kyber = if (features.all_features) true else features.kyber,
+        .ml_dsa = if (features.all_features or features.benchmarks) true else features.ml_dsa,
+        .dilithium = if (features.all_features) true else features.dilithium,
+        .slh_dsa = if (features.all_features) true else features.slh_dsa,
+        .sphincs = if (features.all_features or features.benchmarks) true else features.sphincs,
+        .hybrid = if (features.all_features) true else features.hybrid,
+        .blockchain = if (features.all_features) true else features.blockchain,
+        .interop = if (features.all_features) true else features.interop,
+        .benchmarks = if (features.all_features) features.benchmarks else if (features.minimal) false else features.benchmarks,
+        .tests = if (features.all_features) features.tests else if (features.minimal) false else features.tests,
+        .examples = if (features.all_features) features.examples else if (features.minimal) false else features.examples,
+        .minimal = if (features.all_features) false else if (features.benchmarks) false else features.minimal,
+    };
+
+    // Optional dependencies (only if needed)
     const enable_ffibuild = b.option(bool, "enable-ffibuild", "Enable FFI/C binding builds") orelse false;
 
-    // Dependencies
-    const zcrypto_dep = b.dependency("zcrypto", .{});
-    const zsync_dep = b.dependency("zsync", .{});
+    // === MODULAR IMPORTS ===
+    var imports = std.ArrayList(std.Build.Module.Import){};
+    defer imports.deinit(b.allocator);
 
-    // This creates a module, which represents a collection of source files alongside
-    // some compilation options, such as optimization mode and linked system libraries.
-    // Zig modules are the preferred way of making Zig code available to consumers.
-    // addModule defines a module that we intend to make available for importing
-    // to our consumers. We must give it a name because a Zig package can expose
-    // multiple modules and consumers will need to be able to specify which
-    // module they want to access.
+    // === FEATURE-BASED BUILD OPTIONS ===
+    const build_options = b.addOptions();
+    build_options.addOption(bool, "ml_kem_enabled", final_features.ml_kem);
+    build_options.addOption(bool, "kyber_enabled", final_features.kyber);
+    build_options.addOption(bool, "ml_dsa_enabled", final_features.ml_dsa);
+    build_options.addOption(bool, "dilithium_enabled", final_features.dilithium);
+    build_options.addOption(bool, "slh_dsa_enabled", final_features.slh_dsa);
+    build_options.addOption(bool, "sphincs_enabled", final_features.sphincs);
+    build_options.addOption(bool, "hybrid_enabled", final_features.hybrid);
+    build_options.addOption(bool, "blockchain_enabled", final_features.blockchain);
+    build_options.addOption(bool, "interop_enabled", final_features.interop);
+    build_options.addOption(bool, "minimal_enabled", final_features.minimal);
+
+    imports.append(b.allocator, .{ .name = "build_options", .module = build_options.createModule() }) catch @panic("OOM");
+
+    // === CORE MODULE ===
     const mod = b.addModule("kriptix", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
-        .imports = &.{
-            .{ .name = "zcrypto", .module = zcrypto_dep.module("zcrypto") },
-            .{ .name = "zsync", .module = zsync_dep.module("zsync") },
-        },
+        .optimize = optimize,
+        .imports = imports.items,
     });
 
-    // Default target: Zig static library
+    // === GRANULAR ALGORITHM MODULES ===
+    if (final_features.ml_kem or final_features.kyber) {
+        _ = b.addModule("ml-kem", .{
+            .root_source_file = b.path("src/modules/ml_kem.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "build_options", .module = build_options.createModule() },
+            },
+        });
+    }
+
+    if (final_features.ml_dsa or final_features.dilithium) {
+        _ = b.addModule("ml-dsa", .{
+            .root_source_file = b.path("src/modules/ml_dsa.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "build_options", .module = build_options.createModule() },
+            },
+        });
+    }
+
+    if (final_features.slh_dsa or final_features.sphincs) {
+        _ = b.addModule("slh-dsa", .{
+            .root_source_file = b.path("src/modules/slh_dsa.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "build_options", .module = build_options.createModule() },
+            },
+        });
+    }
+
+    if (final_features.interop) {
+        _ = b.addModule("interop", .{
+            .root_source_file = b.path("src/interop.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = imports.items,
+        });
+    }
+
+    // === LIBRARY TARGETS ===
     const lib = b.addLibrary(.{
         .name = "kriptix",
         .root_module = mod,
@@ -48,156 +144,165 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(lib);
 
-    // FFI target: C ABI dynamic library
-    var c_lib: ?*std.Build.Step.Compile = null;
+    // FFI target (optional)
     if (enable_ffibuild) {
-        c_lib = b.addLibrary(.{
+        const c_lib = b.addLibrary(.{
             .name = "kriptix_c",
             .root_module = mod,
             .linkage = .dynamic,
         });
-        b.installArtifact(c_lib.?);
+        b.installArtifact(c_lib);
+
+        const ffi_step = b.step("ffi", "Build C FFI library");
+        ffi_step.dependOn(&b.addInstallArtifact(c_lib, .{}).step);
     }
 
-    // WASM target: WebAssembly module
-    const wasm_mod = b.addModule("kriptix-wasm", .{
-        .root_source_file = b.path("src/root.zig"),
-        .target = b.resolveTargetQuery(.{
-            .cpu_arch = .wasm32,
-            .os_tag = .freestanding,
-        }),
-        .imports = &.{
-            .{ .name = "zcrypto", .module = zcrypto_dep.module("zcrypto") },
-            .{ .name = "zsync", .module = zsync_dep.module("zsync") },
-        },
-    });
-    // WASM target: WebAssembly module
-    const wasm = b.addLibrary(.{
-        .name = "kriptix",
-        .root_module = wasm_mod,
-        .linkage = .static,
-    });
-    b.installArtifact(wasm);
-
-    // Here we define an executable. An executable needs to have a root module
-    // which needs to expose a `main` function. While we could add a main function
-    // to the module defined above, it's sometimes preferable to split business
-    // logic and the CLI into two separate modules.
-    //
-    // If your goal is to create a Zig library for others to use, consider if
-    // it might benefit from also exposing a CLI tool. A parser library for a
-    // data serialization format could also bundle a CLI syntax checker, for example.
-    //
-    // If instead your goal is to create an executable, consider if users might
-    // be interested in also being able to embed the core functionality of your
-    // program in their own executable in order to avoid the overhead involved in
-    // subprocessing your CLI tool.
-    //
-    // If neither case applies to you, feel free to delete the declaration you
-    // don't need and to put everything under a single module.
-    const exe = b.addExecutable(.{
-        .name = "kriptix-cli",
-        .root_module = b.createModule(.{
-            // b.createModule defines a new module just like b.addModule but,
-            // unlike b.addModule, it does not expose the module to consumers of
-            // this package, which is why in this case we don't have to give it a name.
-            .root_source_file = b.path("src/main.zig"),
-            // Target and optimization levels must be explicitly wired in when
-            // defining an executable or library (in the root module), and you
-            // can also hardcode a specific target for an executable or library
-            // definition if desireable (e.g. firmware for embedded devices).
-            .target = target,
+    // WASM target (optional)
+    if (!features.minimal) {
+        const wasm_mod = b.addModule("kriptix-wasm", .{
+            .root_source_file = b.path("src/root.zig"),
+            .target = b.resolveTargetQuery(.{
+                .cpu_arch = .wasm32,
+                .os_tag = .freestanding,
+            }),
             .optimize = optimize,
-            // List of modules available for import in source files part of the
-            // root module.
-            .imports = &.{
-                .{ .name = "kriptix", .module = mod },
-                .{ .name = "zcrypto", .module = zcrypto_dep.module("zcrypto") },
-                .{ .name = "zsync", .module = zsync_dep.module("zsync") },
-            },
-        }),
-    });
+            .imports = imports.items,
+        });
 
-    // This declares intent for the executable to be installed into the
-    // install prefix when running `zig build` (i.e. when executing the default
-    // step). By default the install prefix is `zig-out/` but can be overridden
-    // by passing `--prefix` or `-p`.
-    b.installArtifact(exe);
+        const wasm_lib = b.addLibrary(.{
+            .name = "kriptix",
+            .root_module = wasm_mod,
+            .linkage = .static,
+        });
+        b.installArtifact(wasm_lib);
 
-    // This creates a top level step. Top level steps have a name and can be
-    // invoked by name when running `zig build` (e.g. `zig build run`).
-    // This will evaluate the `run` step rather than the default step.
-    // For a top level step to actually do something, it must depend on other
-    // steps (e.g. a Run step, as we will see in a moment).
-    const run_step = b.step("run", "Run the app");
-
-    // This creates a RunArtifact step in the build graph. A RunArtifact step
-    // invokes an executable compiled by Zig. Steps will only be executed by the
-    // runner if invoked directly by the user (in the case of top level steps)
-    // or if another step depends on it, so it's up to you to define when and
-    // how this Run step will be executed. In our case we want to run it when
-    // the user runs `zig build run`, so we create a dependency link.
-    const run_cmd = b.addRunArtifact(exe);
-    run_step.dependOn(&run_cmd.step);
-
-    // By making the run step depend on the default step, it will be run from the
-    // installation directory rather than directly from within the cache directory.
-    run_cmd.step.dependOn(b.getInstallStep());
-
-    // This allows the user to pass arguments to the application in the build
-    // command itself, like this: `zig build run -- arg1 arg2 etc`
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
+        const wasm_step = b.step("wasm", "Build WebAssembly module");
+        wasm_step.dependOn(&b.addInstallArtifact(wasm_lib, .{}).step);
     }
 
-    // Creates an executable that will run `test` blocks from the provided module.
-    // Here `mod` needs to define a target, which is why earlier we made sure to
-    // set the releative field.
-    const mod_tests = b.addTest(.{
-        .root_module = mod,
-    });
+    // === CLI EXECUTABLE (Optional) ===
+    if (final_features.examples or !features.fast_build) {
+        var cli_imports = std.ArrayList(std.Build.Module.Import){};
+        defer cli_imports.deinit(b.allocator);
 
-    // A run step that will run the test executable.
-    const run_mod_tests = b.addRunArtifact(mod_tests);
+        cli_imports.append(b.allocator, .{ .name = "kriptix", .module = mod }) catch @panic("OOM");
 
-    // Creates an executable that will run `test` blocks from the executable's
-    // root module. Note that test executables only test one module at a time,
-    // hence why we have to create two separate ones.
-    const exe_tests = b.addTest(.{
-        .root_module = exe.root_module,
-    });
+        const cli_exe = b.addExecutable(.{
+            .name = "kriptix-cli",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/main.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = cli_imports.items,
+            }),
+        });
+        b.installArtifact(cli_exe);
 
-    // A run step that will run the second test executable.
-    const run_exe_tests = b.addRunArtifact(exe_tests);
+        // Run step
+        const run_step = b.step("run", "Run the CLI");
+        const run_cmd = b.addRunArtifact(cli_exe);
+        run_step.dependOn(&run_cmd.step);
 
-    // A top level step for running all tests. dependOn can be called multiple
-    // times and since the two run steps do not depend on one another, this will
-    // make the two of them run in parallel.
-    const test_step = b.step("test", "Run tests");
-    test_step.dependOn(&run_mod_tests.step);
-    test_step.dependOn(&run_exe_tests.step);
+        if (b.args) |args| {
+            run_cmd.addArgs(args);
+        }
+    }
 
-    // Build targets
+    // === CONDITIONAL TESTING SYSTEM ===
+    if (final_features.tests) {
+        // Fast unit tests (< 1 second)
+        const unit_tests = b.addTest(.{
+            .name = "unit-tests",
+            .root_module = mod,
+        });
+
+        const run_unit_tests = b.addRunArtifact(unit_tests);
+
+        // Slow integration tests (only if explicitly requested)
+        const integration_tests = b.addTest(.{
+            .name = "integration-tests",
+            .root_module = mod,
+        });
+
+        const run_integration_tests = b.addRunArtifact(integration_tests);
+
+        // Test steps
+        const test_unit_step = b.step("test-unit", "Run fast unit tests only");
+        test_unit_step.dependOn(&run_unit_tests.step);
+
+        const test_integration_step = b.step("test-integration", "Run slow integration tests");
+        test_integration_step.dependOn(&run_integration_tests.step);
+
+        const test_all_step = b.step("test", "Run all tests");
+        test_all_step.dependOn(&run_unit_tests.step);
+        test_all_step.dependOn(&run_integration_tests.step);
+    }
+
+    // === BENCHMARK SYSTEM ===
+    if (final_features.benchmarks) {
+        const bench_exe = b.addExecutable(.{
+            .name = "kriptix-bench",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("examples/benchmark.zig"),
+                .target = target,
+                .optimize = .ReleaseFast, // Always optimize benchmarks
+                .imports = &.{
+                    .{ .name = "kriptix", .module = mod },
+                },
+            }),
+        });
+
+        const bench_step = b.step("bench", "Run performance benchmarks");
+        const run_bench = b.addRunArtifact(bench_exe);
+        bench_step.dependOn(&run_bench.step);
+    }
+
+    // === BUILD TARGETS ===
     const lib_step = b.step("lib", "Build static library");
     lib_step.dependOn(&b.addInstallArtifact(lib, .{}).step);
 
-    const wasm_step = b.step("wasm", "Build WebAssembly module");
-    wasm_step.dependOn(&b.addInstallArtifact(wasm, .{}).step);
+    // === EXAMPLES ===
+    if (final_features.examples) {
+        const examples = [_][]const u8{
+            "basic_usage",
+        };
 
-    if (enable_ffibuild) {
-        const ffi_step = b.step("ffi", "Build C FFI library");
-        ffi_step.dependOn(&b.addInstallArtifact(c_lib.?, .{}).step);
+        for (examples) |example| {
+            const example_exe = b.addExecutable(.{
+                .name = example,
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path(b.fmt("examples/{s}.zig", .{example})),
+                    .target = target,
+                    .optimize = optimize,
+                    .imports = &.{
+                        .{ .name = "kriptix", .module = mod },
+                    },
+                }),
+            });
+
+            const example_step = b.step(b.fmt("example-{s}", .{example}), b.fmt("Run {s} example", .{example}));
+            const run_example = b.addRunArtifact(example_exe);
+            example_step.dependOn(&run_example.step);
+        }
     }
 
-    // Just like flags, top level steps are also listed in the `--help` menu.
-    //
-    // The Zig build system is entirely implemented in userland, which means
-    // that it cannot hook into private compiler APIs. All compilation work
-    // orchestrated by the build system will result in other Zig compiler
-    // subcommands being invoked with the right flags defined. You can observe
-    // these invocations when one fails (or you pass a flag to increase
-    // verbosity) to validate assumptions and diagnose problems.
-    //
-    // Lastly, the Zig build system is relatively simple and self-contained,
-    // and reading its source code will allow you to master it.
+    // === BUILD INFO ===
+    if (!features.fast_build) {
+        // Print build configuration
+        const config_step = b.step("config", "Show build configuration");
+        const config_exe = b.addExecutable(.{
+            .name = "show-config",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("build_config.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{
+                    .{ .name = "build_options", .module = build_options.createModule() },
+                },
+            }),
+        });
+
+        const run_config = b.addRunArtifact(config_exe);
+        config_step.dependOn(&run_config.step);
+    }
 }

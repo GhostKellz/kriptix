@@ -31,16 +31,7 @@
     // `zig build --fetch` can be used to fetch all dependencies of a package, recursively.
     // Once all dependencies are fetched, `zig build` no longer requires
     // internet connectivity.
-    .dependencies = .{
-        .zcrypto = .{
-            .url = "https://github.com/ghostkellz/zcrypto/archive/main.tar.gz",
-            .hash = "zcrypto-0.9.4-rgQAI0CSDQAPhfJx3mKzh19-Byj2dr8l_J9XRNSaosQj",
-        },
-        .zsync = .{
-            .url = "https://github.com/ghostkellz/zsync/archive/main.tar.gz",
-            .hash = "zsync-0.7.1-KAuhef8qIQApcisOPygXIeE9pC8qzdQL2Jp96JbNQyRm",
-        },
-    },
+    .dependencies = .{},
     .paths = .{
         "build.zig",
         "build.zig.zon",

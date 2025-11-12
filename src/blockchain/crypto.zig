@@ -7,6 +7,7 @@
 const std = @import("std");
 const kriptix = @import("../root.zig");
 const types = @import("types.zig");
+const hybrid = @import("../hybrid/manager.zig");
 
 /// Cryptographic operations error types
 pub const CryptoError = error{
@@ -19,6 +20,7 @@ pub const CryptoError = error{
     KeyDerivationFailed,
     HashingFailed,
     InvalidAlgorithm,
+    MissingHybridMaterial,
 };
 
 /// PQC Key Derivation Context
@@ -300,143 +302,110 @@ pub const KeyManager = struct {
     }
 };
 
-/// Hybrid Cryptography Manager (PQC + Classical)
-pub const HybridCryptoManager = struct {
-    allocator: std.mem.Allocator,
-    pqc_algorithm: kriptix.Algorithm,
-    classical_enabled: bool,
-
-    const Self = @This();
-
-    pub fn init(allocator: std.mem.Allocator, pqc_algorithm: kriptix.Algorithm, classical_enabled: bool) Self {
-        return Self{
-            .allocator = allocator,
-            .pqc_algorithm = pqc_algorithm,
-            .classical_enabled = classical_enabled,
-        };
-    }
-
-    /// Generate hybrid keypair (PQC + Classical)
-    pub fn generate_hybrid_keypair(self: *Self) !HybridKeyPair {
-        // Generate PQC keypair
-        const pqc_keypair = try kriptix.generate_keypair(self.allocator, self.pqc_algorithm);
-
-        var classical_keypair: ?ClassicalKeyPair = null;
-        if (self.classical_enabled) {
-            // Generate classical keypair (placeholder)
-            classical_keypair = ClassicalKeyPair{
-                .public_key = try self.allocator.alloc(u8, 33), // Placeholder size
-                .private_key = try self.allocator.alloc(u8, 32), // Placeholder size
-            };
-            // In real implementation, generate actual classical keys
-        }
-
-        return HybridKeyPair{
-            .pqc_keypair = pqc_keypair,
-            .classical_keypair = classical_keypair,
-        };
-    }
-
-    /// Sign with hybrid approach (both PQC and classical signatures)
-    pub fn hybrid_sign(self: *Self, message: []const u8, hybrid_keypair: HybridKeyPair) !HybridSignature {
-        // Sign with PQC
-        const pqc_signature = try kriptix.sign(self.allocator, hybrid_keypair.pqc_keypair.private_key, message, self.pqc_algorithm);
-
-        var classical_signature: ?[]u8 = null;
-        if (self.classical_enabled and hybrid_keypair.classical_keypair != null) {
-            // Sign with classical algorithm (placeholder)
-            classical_signature = try self.allocator.alloc(u8, 64); // Placeholder
-        }
-
-        return HybridSignature{
-            .pqc_signature = pqc_signature.data,
-            .classical_signature = classical_signature,
-            .pqc_algorithm = self.pqc_algorithm,
-        };
-    }
-
-    /// Verify hybrid signature
-    pub fn hybrid_verify(self: *Self, message: []const u8, signature: HybridSignature, hybrid_pubkey: HybridPublicKey) !bool {
-        // Verify PQC signature
-        const pqc_sig = kriptix.Signature{
-            .data = signature.pqc_signature,
-            .algorithm = signature.pqc_algorithm,
-        };
-
-        const pqc_valid = try kriptix.verify(hybrid_pubkey.pqc_public_key, message, pqc_sig);
-
-        if (!pqc_valid) return false;
-
-        // Verify classical signature if present
-        if (self.classical_enabled and signature.classical_signature != null and hybrid_pubkey.classical_public_key != null) {
-            // Verify classical signature (placeholder)
-            _ = signature.classical_signature;
-            _ = hybrid_pubkey.classical_public_key;
-            return true; // Placeholder
-        }
-
-        return pqc_valid;
-    }
-};
-
-/// Supporting structures for hybrid cryptography
-pub const ClassicalKeyPair = struct {
-    public_key: []u8,
-    private_key: []u8,
-
-    pub fn deinit(self: *ClassicalKeyPair, allocator: std.mem.Allocator) void {
-        allocator.free(self.public_key);
-        allocator.free(self.private_key);
-    }
-};
-
-pub const HybridKeyPair = struct {
-    pqc_keypair: kriptix.KeyPair,
-    classical_keypair: ?ClassicalKeyPair,
-
-    pub fn deinit(self: *HybridKeyPair, allocator: std.mem.Allocator) void {
-        allocator.free(self.pqc_keypair.public_key);
-        allocator.free(self.pqc_keypair.private_key);
-        if (self.classical_keypair) |*classical| {
-            classical.deinit(allocator);
-        }
-    }
-};
-
-pub const HybridPublicKey = struct {
-    pqc_public_key: []const u8,
-    classical_public_key: ?[]const u8,
-};
-
-pub const HybridSignature = struct {
-    pqc_signature: []const u8,
-    classical_signature: ?[]const u8,
-    pqc_algorithm: kriptix.Algorithm,
-
-    pub fn deinit(self: *HybridSignature, allocator: std.mem.Allocator) void {
-        allocator.free(self.pqc_signature);
-        if (self.classical_signature) |classical_sig| {
-            allocator.free(classical_sig);
-        }
-    }
-};
-
 /// High-level convenience functions
 /// Verify transaction signature using the appropriate algorithm
-pub fn verify_transaction_signature(transaction: types.Transaction, algorithm: kriptix.Algorithm) !bool {
-    // This would typically get the public key from the transaction inputs
-    // For now, this is a placeholder that always returns true
-    _ = transaction;
-    _ = algorithm;
+pub fn verify_transaction_signature(allocator: std.mem.Allocator, transaction: *const types.Transaction) !bool {
+    const message = try transaction.get_signing_message(allocator);
+    defer allocator.free(message);
+
+    if (transaction.hybrid_signature) |signature_record| {
+        const pk_record = transaction.hybrid_public_key orelse return CryptoError.InvalidPublicKey;
+
+        const classical_enabled = signature_record.classical_signature != null and pk_record.classical_public_key != null;
+        var manager = hybrid.HybridCryptoManager.init(
+            allocator,
+            signature_record.pqc_algorithm,
+            classical_enabled,
+            pk_record.kem_algorithm,
+        );
+
+        const bundle = hybrid.HybridSignatureBundle{
+            .pqc_signature = signature_record.pqc_signature,
+            .classical_signature = signature_record.classical_signature,
+            .pqc_algorithm = signature_record.pqc_algorithm,
+        };
+
+        const public_key = hybrid.HybridPublicKey{
+            .pqc_public_key = pk_record.pqc_public_key,
+            .pqc_algorithm = pk_record.pqc_algorithm,
+            .classical_public_key = pk_record.classical_public_key,
+            .kem_public_key = pk_record.kem_public_key,
+            .kem_algorithm = pk_record.kem_algorithm,
+        };
+
+        const valid = try manager.hybrid_verify(message, bundle, public_key);
+        if (!valid) return CryptoError.InvalidSignature;
+        return true;
+    }
+
+    const public_key_slice = blk: {
+        if (transaction.hybrid_public_key) |pk_record| {
+            break :blk pk_record.pqc_public_key;
+        }
+        if (transaction.inputs.len > 0) {
+            break :blk transaction.inputs[0].public_key;
+        }
+        return CryptoError.InvalidPublicKey;
+    };
+
+    const signature = kriptix.Signature{
+        .data = transaction.signature,
+        .algorithm = transaction.signature_algorithm,
+    };
+
+    const valid = try kriptix.verify(public_key_slice, message, signature);
+    if (!valid) return CryptoError.InvalidSignature;
     return true;
 }
 
 /// Verify block signature using the appropriate algorithm
-pub fn verify_block_signature(block: types.Block, algorithm: kriptix.Algorithm) !bool {
-    // This would typically verify using the validator's public key
-    // For now, this is a placeholder that always returns true
-    _ = block;
-    _ = algorithm;
+pub fn verify_block_signature(allocator: std.mem.Allocator, block: *const types.Block) !bool {
+    const header = &block.header;
+
+    if (header.hybrid_signature) |signature_record| {
+        const pk_record = header.hybrid_public_key orelse return CryptoError.InvalidPublicKey;
+        const classical_enabled = signature_record.classical_signature != null and pk_record.classical_public_key != null;
+
+        var manager = hybrid.HybridCryptoManager.init(
+            allocator,
+            signature_record.pqc_algorithm,
+            classical_enabled,
+            pk_record.kem_algorithm,
+        );
+
+        const bundle = hybrid.HybridSignatureBundle{
+            .pqc_signature = signature_record.pqc_signature,
+            .classical_signature = signature_record.classical_signature,
+            .pqc_algorithm = signature_record.pqc_algorithm,
+        };
+
+        const public_key = hybrid.HybridPublicKey{
+            .pqc_public_key = pk_record.pqc_public_key,
+            .pqc_algorithm = pk_record.pqc_algorithm,
+            .classical_public_key = pk_record.classical_public_key,
+            .kem_public_key = pk_record.kem_public_key,
+            .kem_algorithm = pk_record.kem_algorithm,
+        };
+
+        const valid = try manager.hybrid_verify(header.hash[0..], bundle, public_key);
+        if (!valid) return CryptoError.InvalidSignature;
+        return true;
+    }
+
+    const public_key_slice = blk: {
+        if (header.hybrid_public_key) |pk_record| {
+            break :blk pk_record.pqc_public_key;
+        }
+        return CryptoError.InvalidPublicKey;
+    };
+
+    const signature = kriptix.Signature{
+        .data = header.signature,
+        .algorithm = header.signature_algorithm,
+    };
+
+    const valid = try kriptix.verify(public_key_slice, header.hash[0..], signature);
+    if (!valid) return CryptoError.InvalidSignature;
     return true;
 }
 

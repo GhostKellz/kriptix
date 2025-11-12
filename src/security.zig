@@ -44,14 +44,14 @@ pub const SecureMemory = struct {
 pub const ConstantTime = struct {
     /// Constant-time conditional selection
     pub fn select(condition: u8, true_val: u32, false_val: u32) u32 {
-        const mask = @as(u32, @intFromBool(condition != 0)) -% 1;
+        const mask = @as(u32, 0) -% @as(u32, @intFromBool(condition != 0));
         return (mask & true_val) | (~mask & false_val);
     }
 
     /// Constant-time conditional move
     pub fn cmov(dest: []u8, src: []const u8, condition: u8) void {
         std.debug.assert(dest.len == src.len);
-        const mask = @as(u8, @intFromBool(condition != 0)) -% 1;
+        const mask = @as(u8, 0) -% @as(u8, @intFromBool(condition != 0));
 
         for (0..dest.len) |i| {
             dest[i] ^= mask & (dest[i] ^ src[i]);
